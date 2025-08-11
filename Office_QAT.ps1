@@ -1,14 +1,42 @@
-<# .SYNOPSIS A tool for administrators to back up and restore a user's Microsoft Office settings. #>
+<#
+.SYNOPSIS
+    A tool for administrators to back up and restore a user's Microsoft Office settings. Runs elevated
+    but automatically targets the active desktop user. Includes a GUI with a refresh button.
+
+.DESCRIPTION
+    This script is designed to be run as SYSTEM or an Administrator. It automatically detects the
+    currently active desktop user (owner of explorer.exe) and targets their profile for backup/restore
+    of Office settings (Ribbon, Templates, Signatures, Dictionaries).
+
+    The GUI includes a "Refresh Detection" button to re-scan for items if they change while the tool is open.
+
+    All actions are logged to C:\Windows\MITLL\Logs if the script has permissions to write there.
+
+.PARAMETER UserName
+    Optional. Explicitly specifies the username to target (e.g., 'jdoe'). If omitted, the script
+    will automatically detect the active console user.
+
+.PARAMETER Action
+    For command-line use. Must be either 'backup' or 'restore'.
+
+.PARAMETER Path
+    For command-line use. The root folder for the backup/restore operation.
+
+.PARAMETER Items
+    For command-line use. An array of items to process: 'RibbonUI', 'Templates', 'Signatures', 'Dictionaries'.
+#>
 param(
     [Parameter(HelpMessage = "Explicitly specify a user to target, overriding auto-detection.")] [string]$UserName,
     [Parameter(HelpMessage = "Specify the action: backup or restore.")] [ValidateSet('backup', 'restore', IgnoreCase = $true)] [string]$Action,
     [Parameter(HelpMessage = "The root directory for the backup/restore files.")] [string]$Path,
     [Parameter(HelpMessage = "The specific items to process.")] [ValidateSet('RibbonUI', 'Templates', 'Signatures', 'Dictionaries', IgnoreCase = $true)] [string[]]$Items
 )
-# (All functions from the previous script remain exactly the same)
+# --- Add necessary assemblies for GUI ---
 Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
+# --- Global Variables & Logging Setup ---
 $logDirectory = "C:\Windows\MITLL\Logs"; $logFile = Join-Path -Path $logDirectory -ChildPath "OfficeCustomizationBackup.log"; if (-not (Test-Path -Path $logDirectory)) { try { New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null } catch { Write-Warning "Could not create log directory. Logging will be disabled."; $logFile = $null } }
 $officeApps = "WINWORD", "EXCEL", "POWERPNT", "OUTLOOK"; $script:customizationPaths = $null; $script:activeUser = $null
+# --- Core Functions ---
 function Get-ActiveUser { try { $explorerProcess = Get-CimInstance -ClassName Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction Stop; if (!$explorerProcess) { return $null }; $ownerInfo = $explorerProcess | ForEach-Object { $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwner; if ($owner.ReturnValue -eq 0) { [PSCustomObject]@{ Domain = $owner.Domain; User = $owner.User; SessionId = $_.SessionId } } } | Sort-Object -Property SessionId | Select-Object -First 1; if (!$ownerInfo) { return $null }; $userObject = Get-CimInstance -ClassName Win32_UserAccount -Filter "Domain = '$($ownerInfo.Domain)' AND Name = '$($ownerInfo.User)'"; $profile = Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($userObject.SID)"; return [PSCustomObject]@{ UserName = "$($ownerInfo.Domain)\$($ownerInfo.User)"; ProfilePath = $profile.ProfileImagePath } } catch { Write-Warning "Could not determine active user: $_"; return $null } }
 function Get-OfficeCustomizationPaths { param([string]$UserProfilePath); $roamingAppData = Join-Path -Path $UserProfilePath -ChildPath "AppData\Roaming"; $localAppData = Join-Path -Path $UserProfilePath -ChildPath "AppData\Local"; $paths = @{ RibbonUI = @{ Path = Join-Path $localAppData "Microsoft\Office"; Exists = $false; Filter = "*.officeUI"; Type = "File" }; Templates = @{ Path = Join-Path $roamingAppData "Microsoft\Templates"; Exists = $false; Filter = "*.dot*"; Type = "File" }; Signatures = @{ Path = Join-Path $roamingAppData "Microsoft\Signatures"; Exists = $false; Filter = "*"; Type = "Folder" }; Dictionaries = @{ Path = Join-Path $roamingAppData "Microsoft\UProof"; Exists = $false; Filter = "*.dic"; Type = "File" } }; foreach ($key in $paths.Keys) { if (Test-Path $paths[$key].Path) { if (Get-ChildItem -Path $paths[$key].Path -Filter $paths[$key].Filter -ErrorAction SilentlyContinue | Select-Object -First 1) { $paths[$key].Exists = $true } } }; return $paths }
 function Write-Log { param([string]$message); if ($logFile) { "$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) $message" | Add-Content -Path $logFile } }
@@ -19,33 +47,50 @@ function Start-Restore { param([string]$RestorePath, [string[]]$ItemsToRestore);
 # --- SCRIPT EXECUTION LOGIC ---
 Write-Log "--------------------------------"
 if ($UserName) { try { $userObject = Get-CimInstance -ClassName Win32_UserAccount -Filter "Name = '$UserName'" -ErrorAction Stop; if ($userObject) { $profile = Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($userObject.SID)"; $script:activeUser = [PSCustomObject]@{ UserName = $userObject.Name; ProfilePath = $profile.ProfileImagePath } } } catch { Write-Warning "Could not find specified user '$UserName'. Error: $_" } } else { $script:activeUser = Get-ActiveUser }
-if (!$script:activeUser) { $errorMessage = "FATAL: Could not determine the active user profile. Cannot continue."; Update-UIAndLog $errorMessage; if (!$PSBoundParameters.ContainsKey('Action')) { [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error", "OK", "Error") }; Exit 1 }
-$script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath
+if (!$script:activeUser) { $errorMessage = "FATAL: Could not determine active user profile. Cannot continue."; Update-UIAndLog $errorMessage; if (!$PSBoundParameters.ContainsKey('Action')) { [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error", "OK", "Error") }; Exit 1 }
+
+# --- NEW: UI UPDATE FUNCTION ---
+function Update-DetectedPathsUI {
+    Update-UIAndLog "Refreshing detected paths..."
+    $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath
+    $checkboxMap = @{ RibbonUI = $chkRibbon; Templates = $chkTemplates; Signatures = $chkSignatures; Dictionaries = $chkDictionaries }
+    $pathMessage = ""
+    foreach($key in $script:customizationPaths.Keys){
+        $pathInfo = $script:customizationPaths[$key]
+        $status = if ($pathInfo.Exists) { "Detected" } else { "Not Found" }
+        $checkboxMap[$key].Enabled = $pathInfo.Exists
+        $checkboxMap[$key].Checked = $pathInfo.Exists
+        $pathMessage += "$key`: ($status)`r`n  $($pathInfo.Path)`r`n`r`n"
+    }
+    $pathDisplayTextBox.Text = $pathMessage.Trim()
+    Update-UIAndLog "Detection refresh complete."
+}
 
 if ($PSBoundParameters.ContainsKey('Action')) {
+    $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath
     Update-UIAndLog "Running in command-line mode for user '$($script:activeUser.UserName)'."
     if (-not ($PSBoundParameters.ContainsKey('Path') -and $PSBoundParameters.ContainsKey('Items'))) { Update-UIAndLog "ERROR: -Action, -Path, and -Items are mandatory."; Exit 1 }
     $success = $false
     if ($Action -eq 'backup') { $success = Start-Backup -BackupPath $Path -ItemsToBackup $Items }
     elseif ($Action -eq 'restore') { $success = Start-Restore -RestorePath $Path -ItemsToRestore $Items }
     Update-UIAndLog "Command-line operation finished."
-    # --- ADDED FOR AUTOMATION ---
     if ($success) { Exit 0 } else { Exit 1 }
 }
 
-# (GUI Code from here is identical and will be skipped by the command-line execution)
-$script:mainForm = New-Object System.Windows.Forms.Form; $script:mainForm.Text = "Office Customization Backup & Restore"; $script:mainForm.MinimumSize = '560, 640'; $script:mainForm.Size = '580, 680'; $script:mainForm.StartPosition = "CenterScreen"; $script:mainForm.FormBorderStyle = "Sizable"
+# --- GUI Window and Controls ---
+$script:mainForm = New-Object System.Windows.Forms.Form; $script:mainForm.Text = "Office Customization Backup & Restore"; $script:mainForm.MinimumSize = '560, 680'; $script:mainForm.Size = '580, 720'; $script:mainForm.StartPosition = "CenterScreen"; $script:mainForm.FormBorderStyle = "Sizable"
 $optionsGroupBox = New-Object System.Windows.Forms.GroupBox; $optionsGroupBox.Location = '20, 20'; $optionsGroupBox.Size = '520, 80'; $optionsGroupBox.Text = "1. Select Items to Process"; $optionsGroupBox.Anchor = "Top, Left, Right"
-$pathsGroupBox = New-Object System.Windows.Forms.GroupBox; $pathsGroupBox.Location = '20, 110'; $pathsGroupBox.Size = '520, 160'; $pathsGroupBox.Text = "2. Detected Paths for: $($script:activeUser.UserName)"; $pathsGroupBox.Anchor = "Top, Left, Right"
-$actionGroupBox = New-Object System.Windows.Forms.GroupBox; $actionGroupBox.Location = '20, 280'; $actionGroupBox.Size = '520, 150'; $actionGroupBox.Text = "3. Perform Action"; $actionGroupBox.Anchor = "Top, Left, Right"
-$logGroupBox = New-Object System.Windows.Forms.GroupBox; $logGroupBox.Location = '20, 440'; $logGroupBox.Size = '520, 160'; $logGroupBox.Text = "Activity Log"; $logGroupBox.Anchor = "Top, Bottom, Left, Right"
+$pathsGroupBox = New-Object System.Windows.Forms.GroupBox; $pathsGroupBox.Location = '20, 110'; $pathsGroupBox.Size = '520, 200'; $pathsGroupBox.Text = "2. Detected Paths for: $($script:activeUser.UserName)"; $pathsGroupBox.Anchor = "Top, Left, Right"
+$actionGroupBox = New-Object System.Windows.Forms.GroupBox; $actionGroupBox.Location = '20, 320'; $actionGroupBox.Size = '520, 150'; $actionGroupBox.Text = "3. Perform Action"; $actionGroupBox.Anchor = "Top, Left, Right"
+$logGroupBox = New-Object System.Windows.Forms.GroupBox; $logGroupBox.Location = '20, 480'; $logGroupBox.Size = '520, 160'; $logGroupBox.Text = "Activity Log"; $logGroupBox.Anchor = "Top, Bottom, Left, Right"
 $chkRibbon = New-Object System.Windows.Forms.CheckBox; $chkRibbon.Text = "Ribbon/Toolbar"; $chkRibbon.Location = '20, 30'; $chkRibbon.AutoSize = $true
 $chkTemplates = New-Object System.Windows.Forms.CheckBox; $chkTemplates.Text = "Templates"; $chkTemplates.Location = '180, 30'; $chkTemplates.AutoSize = $true
 $chkSignatures = New-Object System.Windows.Forms.CheckBox; $chkSignatures.Text = "Signatures"; $chkSignatures.Location = '20, 55'; $chkSignatures.AutoSize = $true
 $chkDictionaries = New-Object System.Windows.Forms.CheckBox; $chkDictionaries.Text = "Dictionaries"; $chkDictionaries.Location = '180, 55'; $chkDictionaries.AutoSize = $true
 $optionsGroupBox.Controls.AddRange(@($chkRibbon, $chkTemplates, $chkSignatures, $chkDictionaries))
-$pathDisplayTextBox = New-Object System.Windows.Forms.TextBox; $pathDisplayTextBox.Location = '15, 25'; $pathDisplayTextBox.Size = '490, 120'; $pathDisplayTextBox.Multiline = $true; $pathDisplayTextBox.ReadOnly = $true; $pathDisplayTextBox.Scrollbars = "Vertical"; $pathDisplayTextBox.Anchor = "Top, Bottom, Left, Right"; $pathDisplayTextBox.Font = "Consolas, 8.5"
-$pathsGroupBox.Controls.Add($pathDisplayTextBox)
+$pathDisplayTextBox = New-Object System.Windows.Forms.TextBox; $pathDisplayTextBox.Location = '15, 25'; $pathDisplayTextBox.Size = '490, 130'; $pathDisplayTextBox.Multiline = $true; $pathDisplayTextBox.ReadOnly = $true; $pathDisplayTextBox.Scrollbars = "Vertical"; $pathDisplayTextBox.Anchor = "Top, Bottom, Left, Right"; $pathDisplayTextBox.Font = "Consolas, 8.5"
+$refreshButton = New-Object System.Windows.Forms.Button; $refreshButton.Location = '15, 160'; $refreshButton.Size = '490, 25'; $refreshButton.Text = "Refresh Detection"; $refreshButton.Anchor = "Bottom, Left, Right"
+$pathsGroupBox.Controls.AddRange(@($pathDisplayTextBox, $refreshButton))
 $pathLabel = New-Object System.Windows.Forms.Label; $pathLabel.Text = "Backup Location / Restore Source Path:"; $pathLabel.Location = '20, 30'; $pathLabel.AutoSize = $true
 $pathTextBox = New-Object System.Windows.Forms.TextBox; $pathTextBox.Location = '20, 50'; $pathTextBox.Size = '400, 20'; $pathTextBox.Anchor = "Top, Left, Right"
 $browseButton = New-Object System.Windows.Forms.Button; $browseButton.Location = '430, 48'; $browseButton.Size = '75, 23'; $browseButton.Text = "Browse..."; $browseButton.Anchor = "Top, Right"
@@ -56,8 +101,20 @@ $script:logTextBox = New-Object System.Windows.Forms.TextBox; $script:logTextBox
 $logFileLabel = New-Object System.Windows.Forms.Label; $logFileLabel.Location = '15, 125'; $logFileLabel.Size = '490, 20'; $logFileLabel.Anchor = "Bottom, Left, Right";
 $logGroupBox.Controls.AddRange(@($script:logTextBox, $logFileLabel))
 $script:mainForm.Controls.AddRange(@($optionsGroupBox, $pathsGroupBox, $actionGroupBox, $logGroupBox))
-$script:mainForm.Add_Load({ Update-UIAndLog "GUI started for user '$($script:activeUser.UserName)'."; $checkboxMap = @{ RibbonUI = $chkRibbon; Templates = $chkTemplates; Signatures = $chkSignatures; Dictionaries = $chkDictionaries }; $pathMessage = ""; foreach($key in $script:customizationPaths.Keys){ $pathInfo = $script:customizationPaths[$key]; $status = if ($pathInfo.Exists) { "Detected" } else { "Not Found" }; $checkboxMap[$key].Enabled = $pathInfo.Exists; $checkboxMap[$key].Checked = $pathInfo.Exists; $pathMessage += "$key`: ($status)`r`n  $($pathInfo.Path)`r`n`r`n" }; $pathDisplayTextBox.Text = $pathMessage.Trim(); if ($logFile) { $logFileLabel.Text = "Log File: $logFile" } else { $logFileLabel.Text = "Log File: Disabled (insufficient permissions)" }; Update-UIAndLog "Detection complete. Ready." })
+
+# --- GUI Event Handlers ---
+$script:mainForm.Add_Load({
+    Update-UIAndLog "GUI started for user '$($script:activeUser.UserName)'."
+    if ($logFile) { $logFileLabel.Text = "Log File: $logFile" } else { $logFileLabel.Text = "Log File: Disabled (insufficient permissions)" }
+    Update-DetectedPathsUI # Initial scan and UI population
+})
+$refreshButton.Add_Click({
+    Update-DetectedPathsUI # Re-scan and update UI on click
+})
 $browseButton.Add_Click({ $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog; if ($folderBrowser.ShowDialog() -eq "OK") { $pathTextBox.Text = $folderBrowser.SelectedPath } })
 $backupButton.Add_Click({ if ([string]::IsNullOrWhiteSpace($pathTextBox.Text)) { [System.Windows.Forms.MessageBox]::Show("Select backup path.", "Error", "OK", "Error"); return }; $items = ($optionsGroupBox.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Checked } | ForEach-Object { $_.Text.Replace("/","") }); if ($items.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Select at least one item.", "Warning", "OK", "Warning"); return }; if (Start-Backup -BackupPath $pathTextBox.Text -ItemsToBackup $items) { [System.Windows.Forms.MessageBox]::Show("Backup complete.", "Success", "OK", "Information") } else { [System.Windows.Forms.MessageBox]::Show("Error during backup. Check log.", "Error", "OK", "Error") } })
 $restoreButton.Add_Click({ if ([string]::IsNullOrWhiteSpace($pathTextBox.Text)) { [System.Windows.Forms.MessageBox]::Show("Select restore path.", "Error", "OK", "Error"); return }; $items = ($optionsGroupBox.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Checked } | ForEach-Object { $_.Text.Replace("/","") }); if ($items.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Select at least one item.", "Warning", "OK", "Warning"); return }; if (Start-Restore -RestorePath $pathTextBox.Text -ItemsToRestore $items) { [System.Windows.Forms.MessageBox]::Show("Restore complete.", "Success", "OK", "Information") } else { [System.Windows.Forms.MessageBox]::Show("Error during restore. Check log.", "Error", "OK", "Error") } })
-$script:mainForm.ShowDialog(); Write-Log "Application closed."
+
+# --- Show the GUI ---
+$script:mainForm.ShowDialog()
+Write-Log "Application closed."
