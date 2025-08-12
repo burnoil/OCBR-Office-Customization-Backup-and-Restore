@@ -1,7 +1,8 @@
 # OCBR---Office-Customization-Backup-and-Restore
 GUI tool to automate the backup and restoration of Microsoft Office customizations.
 
-<img width="581" height="748" alt="image" src="https://github.com/user-attachments/assets/fe09ce90-52ed-47e8-bee9-7ba4e489dfe9" />
+<img width="581" height="748" alt="image" src="https://github.com/user-attachments/assets/65d41a2c-2182-43de-9ec0-f5375e2b0619" />
+
 
 .SYNOPSIS
     A comprehensive tool for administrators to back up and restore a user's Microsoft Office settings.
