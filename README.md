@@ -3,10 +3,29 @@ GUI tool to automate the backup and restoration of Microsoft Office customizatio
 
 <img width="581" height="748" alt="image" src="https://github.com/user-attachments/assets/fe09ce90-52ed-47e8-bee9-7ba4e489dfe9" />
 
+.SYNOPSIS
+    A comprehensive tool for administrators to back up and restore a user's Microsoft Office settings.
+    Runs elevated but automatically targets the active desktop user.
 
+.DESCRIPTION
+    This script is designed to be run as SYSTEM or an Administrator. It automatically detects the
+    currently active desktop user and targets their profile for backup and restore of key Office settings.
 
-Command line to backup:
-powershell.exe -ExecutionPolicy Bypass -File "C:\Path\On\Client\To\OfficeCustomizationTool.ps1" -Action backup -Path $BackupPath -Items "RibbonUI","Templates","Signatures","Dictionaries"
+.VERSION
+    1.0.0
 
-Command line to restor:
-powershell.exe -ExecutionPolicy Bypass -File "C:\Path\On\Client\To\OfficeCustomizationTool.ps1" -Action restore -Path $BackupPath -Items "RibbonUI","Templates","Signatures","Dictionaries"
+.PARAMETER UserName
+    Optional. Explicitly specifies the username to target (e.g., 'jdoe'), overriding auto-detection.
+
+.PARAMETER Action
+    For command-line use. Must be either 'backup' or 'restore'.
+
+.PARAMETER Path
+    For command-line use. The root folder for the backup/restore operation.
+
+.PARAMETER Items
+    For command-line use. An array of items to process: 'RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect'.
+
+.EXAMPLE
+    # Back up ALL supported settings for the active user via command line.
+    .\OfficeCustomizationTool.ps1 -Action backup -Path "C:\Backups" -Items "RibbonUI","Templates","Signatures","Dictionaries","AutoComplete","ExcelMacros","AutoCorrect"
