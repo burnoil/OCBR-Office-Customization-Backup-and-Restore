@@ -21,6 +21,23 @@
 
 .PARAMETER Items
     For command-line use. An array of items to process: 'RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect', 'VisioContent'.
+
+.EXAMPLE
+    # Run in interactive GUI mode. Will auto-detect the user at the console.
+    # Must be "Run as administrator".
+    .\OfficeCustomizationTool.ps1
+
+.EXAMPLE
+    # Back up Outlook Signatures and the Auto-Complete list for the active user.
+    .\OfficeCustomizationTool.ps1 -Action backup -Path "C:\IT_Backups" -Items "Signatures", "AutoComplete"
+
+.EXAMPLE
+    # Back up ALL supported settings for a specific user 'bsmith' to a network share.
+    .\OfficeCustomizationTool.ps1 -Action backup -Path "\\FileServer\Backups\bsmith" -UserName "bsmith" -Items "RibbonUI","Templates","Signatures","Dictionaries","AutoComplete","ExcelMacros","AutoCorrect","VisioContent"
+
+.EXAMPLE
+    # Restore only Visio content for the active user from a backup.
+    .\OfficeCustomizationTool.ps1 -Action restore -Path "C:\IT_Backups" -Items "VisioContent"
 #>
 param(
     [Parameter(HelpMessage = "Explicitly specify a user to target, overriding auto-detection.")] [string]$UserName,
@@ -44,25 +61,20 @@ function Get-OfficeCustomizationPaths {
     param([string]$UserProfilePath, [string]$UserSID)
     $roamingAppData = Join-Path -Path $UserProfilePath -ChildPath "AppData\Roaming"
     $localAppData = Join-Path -Path $UserProfilePath -ChildPath "AppData\Local"
-    
-    # Reliably get the user's Documents folder path from the registry using their SID
     $userShellFolders = "Registry::HKEY_USERS\$UserSID\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
     $documentsPath = (Get-ItemProperty -Path $userShellFolders -ErrorAction SilentlyContinue).Personal
-
     $paths = @{
         RibbonUI     = @{ Name = "Ribbon/Toolbar"; Path = Join-Path $localAppData "Microsoft\Office"; Exists = $false; Filter = "*.officeUI"; Type = "File" }
-        Templates    = @{ Name = "Office Templates"; Path = Join-Path $roamingAppData "Microsoft\Templates"; Exists = $false; Filter = "*"; Type = "File" } # Broadened filter
+        Templates    = @{ Name = "Office Templates"; Path = Join-Path $roamingAppData "Microsoft\Templates"; Exists = $false; Filter = "*"; Type = "File" }
         Signatures   = @{ Name = "Outlook Signatures"; Path = Join-Path $roamingAppData "Microsoft\Signatures"; Exists = $false; Filter = "*"; Type = "Folder" }
         Dictionaries = @{ Name = "Custom Dictionaries"; Path = Join-Path $roamingAppData "Microsoft\UProof"; Exists = $false; Filter = "*.dic"; Type = "File" }
         AutoComplete = @{ Name = "Outlook Auto-Complete"; Path = Join-Path $localAppData "Microsoft\Outlook\RoamCache"; Exists = $false; Filter = "Stream_Autocomplete_*.dat"; Type = "File" }
         ExcelMacros  = @{ Name = "Global Excel Macros"; Path = Join-Path $roamingAppData "Microsoft\Excel\XLSTART"; Exists = $false; Filter = "PERSONAL.XLSB"; Type = "File" }
         AutoCorrect  = @{ Name = "Office AutoCorrect"; Path = Join-Path $roamingAppData "Microsoft\Office"; Exists = $false; Filter = "*.acl"; Type = "File" }
     }
-    # Add Visio path only if the Documents folder was found
     if ($documentsPath -and (Test-Path $documentsPath)) {
         $paths.Add("VisioContent", @{ Name = "Visio Stencils/Templates"; Path = Join-Path $documentsPath "My Shapes"; Exists = $false; Filter = "*"; Type = "Folder" })
     }
-
     foreach ($key in $paths.Keys) {
         if ($paths[$key].Path -and (Test-Path $paths[$key].Path)) {
             if (Get-ChildItem -Path $paths[$key].Path -Filter $paths[$key].Filter -ErrorAction SilentlyContinue | Select-Object -First 1) { $paths[$key].Exists = $true }
@@ -70,19 +82,21 @@ function Get-OfficeCustomizationPaths {
     }
     return $paths
 }
-# (All other functions remain the same as the previous version)
 function Write-Log { param([string]$message); if ($logFile) { "$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) $message" | Add-Content -Path $logFile } }
 function Update-UIAndLog { param([string]$message); Write-Log $message; if ($PSBoundParameters.ContainsKey('Action')) { Write-Host $message }; if ($script:logTextBox) { $script:logTextBox.AppendText("`r`n$message"); $script:logTextBox.SelectionStart = $script:logTextBox.Text.Length; $script:logTextBox.ScrollToCaret(); $script:mainForm.Update() } }
 function Start-Backup { param([string]$BackupPath, [string[]]$ItemsToBackup); Update-UIAndLog "Starting backup for user '$($script:activeUser.UserName)'..."; try { foreach ($key in $ItemsToBackup) { if ($script:customizationPaths[$key].Exists) { $sourceInfo = $script:customizationPaths[$key]; $destination = Join-Path $BackupPath $key; if (!(Test-Path $destination)) { New-Item -Path $destination -ItemType Directory -Force | Out-Null }; Update-UIAndLog "Backing up $($sourceInfo.Name)..."; if ($sourceInfo.Type -eq "File") { Get-ChildItem -Path $sourceInfo.Path -Filter $sourceInfo.Filter | ForEach-Object { Copy-Item -Path $_.FullName -Destination $destination -Force } } elseif ($sourceInfo.Type -eq "Folder") { Copy-Item -Path ($sourceInfo.Path + "\*") -Destination $destination -Recurse -Force } } else { Update-UIAndLog "Skipping ${key}: Not found." } }; Update-UIAndLog "Backup completed successfully!"; return $true } catch { Update-UIAndLog "ERROR during backup: $_"; return $false } }
 function Start-Restore { param([string]$RestorePath, [string[]]$ItemsToRestore); $runningOfficeProcs = Get-Process -Name $officeApps -ErrorAction SilentlyContinue; if ($runningOfficeProcs) { $message = "Office apps must be closed. Close them now?"; $result = 'No'; if (!$PSBoundParameters.ContainsKey('Action')) { $result = [System.Windows.Forms.MessageBox]::Show($message, "Warning", "YesNo", "Warning") } else { Update-UIAndLog "WARNING: Office apps running. Aborting."; return $false }; if ($result -eq 'Yes') { Update-UIAndLog "Closing Office apps..."; $runningOfficeProcs | Stop-Process -Force; Start-Sleep -Seconds 2 } else { Update-UIAndLog "Restore cancelled."; return $false } }; Update-UIAndLog "Starting restore for user '$($script:activeUser.UserName)'..."; try { foreach ($key in $ItemsToRestore) { $sourceInfo = $script:customizationPaths[$key]; $destinationInfo = $script:customizationPaths[$key]; $source = Join-Path $RestorePath $key; if (Test-Path $source) { Update-UIAndLog "Restoring $($sourceInfo.Name)..."; Copy-Item -Path ($source + "\*") -Destination $destinationInfo.Path -Recurse -Force } else { Update-UIAndLog "WARNING: Source for $key not found. Skipping." } }; Update-UIAndLog "Restore completed successfully!"; return $true } catch { Update-UIAndLog "ERROR during restore: $_"; return $false } }
-function Update-DetectedPathsUI { Update-UIAndLog "Refreshing detected paths..."; $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath -UserSID $script:activeUser.SID; $pathMessage = ""; foreach($key in $script:customizationPaths.Keys){ $pathInfo = $script:customizationPaths[$key]; $status = if ($pathInfo.Exists) { "Detected" } else { "Not Found" }; $checkboxMap[$key].Enabled = $pathInfo.Exists; $checkboxMap[$key].Checked = $pathInfo.Exists; $pathMessage += "$($pathInfo.Name)`: ($status)`r`n  $($pathInfo.Path)`r`n`r`n" }; $pathDisplayTextBox.Text = $pathMessage.Trim(); Update-UIAndLog "Detection refresh complete." }
+function Update-DetectedPathsUI { Update-UIAndLog "Refreshing detected paths..."; $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath -UserSID $script:activeUser.SID; $pathMessage = ""; foreach($key in $script:checkboxMap.Keys){ if ($script:customizationPaths.ContainsKey($key)) { $pathInfo = $script:customizationPaths[$key]; $status = if ($pathInfo.Exists) { "Detected" } else { "Not Found" }; $checkboxMap[$key].Enabled = $pathInfo.Exists; $checkboxMap[$key].Checked = $pathInfo.Exists; $pathMessage += "$($pathInfo.Name)`: ($status)`r`n  $($pathInfo.Path)`r`n`r`n" } else { $checkboxMap[$key].Enabled = $false; $checkboxMap[$key].Checked = $false } }; $pathDisplayTextBox.Text = $pathMessage.Trim(); Update-UIAndLog "Detection refresh complete." }
 
 # --- SCRIPT EXECUTION LOGIC ---
 Write-Log "--------------------------------"; Write-Log "Application v$version starting..."
 if ($UserName) { try { $userObject = Get-CimInstance -ClassName Win32_UserAccount -Filter "Name = '$UserName'" -ErrorAction Stop; if ($userObject) { $profile = Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($userObject.SID)"; $script:activeUser = [PSCustomObject]@{ UserName = $userObject.Name; ProfilePath = $profile.ProfileImagePath; SID = $userObject.SID } } } catch { Write-Warning "Could not find specified user '$UserName'. Error: $_" } } else { $script:activeUser = Get-ActiveUser }
 if (!$script:activeUser) { $errorMessage = "FATAL: Could not determine active user profile. Cannot continue."; Update-UIAndLog $errorMessage; if (!$PSBoundParameters.ContainsKey('Action')) { [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error", "OK", "Error") }; Exit 1 }
-$script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath -UserSID $script:activeUser.SID
-if ($PSBoundParameters.ContainsKey('Action')) { Update-UIAndLog "Running in command-line mode for user '$($script:activeUser.UserName)'."; if (-not ($PSBoundParameters.ContainsKey('Path') -and $PSBoundParameters.ContainsKey('Items'))) { Update-UIAndLog "ERROR: -Action, -Path, and -Items are mandatory."; Exit 1 }; $success = $false; if ($Action -eq 'backup') { $success = Start-Backup -BackupPath $Path -ItemsToBackup $Items } elseif ($Action -eq 'restore') { $success = Start-Restore -RestorePath $Path -ItemsToRestore $Items }; Update-UIAndLog "Command-line operation finished."; if ($success) { Exit 0 } else { Exit 1 } }
+
+if ($PSBoundParameters.ContainsKey('Action')) {
+    $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath -UserSID $script:activeUser.SID
+    Update-UIAndLog "Running in command-line mode for user '$($script:activeUser.UserName)'."; if (-not ($PSBoundParameters.ContainsKey('Path') -and $PSBoundParameters.ContainsKey('Items'))) { Update-UIAndLog "ERROR: -Action, -Path, and -Items are mandatory."; Exit 1 }; $success = $false; if ($Action -eq 'backup') { $success = Start-Backup -BackupPath $Path -ItemsToBackup $Items } elseif ($Action -eq 'restore') { $success = Start-Restore -RestorePath $Path -ItemsToRestore $Items }; Update-UIAndLog "Command-line operation finished."; if ($success) { Exit 0 } else { Exit 1 }
+}
 
 # --- GUI Window and Controls ---
 $script:mainForm = New-Object System.Windows.Forms.Form; $script:mainForm.Text = "Office Customization Backup & Restore - v$version"; $script:mainForm.MinimumSize = '580, 720'; $script:mainForm.Size = '600, 780'; $script:mainForm.StartPosition = "CenterScreen"; $script:mainForm.FormBorderStyle = "Sizable"
