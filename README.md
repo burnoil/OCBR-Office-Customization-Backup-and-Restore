@@ -13,7 +13,7 @@ GUI tool to automate the backup and restoration of Microsoft Office customizatio
     currently active desktop user and targets their profile for backup and restore of key Office settings.
 
 .VERSION
-    1.0.0
+    1.1.0
 
 .PARAMETER UserName
     Optional. Explicitly specifies the username to target (e.g., 'jdoe'), overriding auto-detection.
