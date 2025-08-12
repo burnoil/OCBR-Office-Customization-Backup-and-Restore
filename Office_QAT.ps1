@@ -7,16 +7,8 @@
     This script is designed to be run as SYSTEM or an Administrator. It automatically detects the
     currently active desktop user and targets their profile for backup and restore of key Office settings.
 
-    Supported Items:
-    - Ribbon/Toolbar UI (.officeUI)
-    - Office Templates (.dot*)
-    - Outlook Signatures
-    - Custom Dictionaries (.dic)
-    - Outlook Auto-Complete Cache (Nickname cache)
-    - Excel Personal Macro Workbook (PERSONAL.XLSB)
-    - Office AutoCorrect Lists (.acl)
-
-    All actions are logged to C:\Windows\MITLL\Logs if permissions allow.
+.VERSION
+    1.0.0
 
 .PARAMETER UserName
     Optional. Explicitly specifies the username to target (e.g., 'jdoe'), overriding auto-detection.
@@ -42,6 +34,9 @@ param(
     [ValidateSet('RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect', IgnoreCase = $true)]
     [string[]]$Items
 )
+# --- APPLICATION VERSION ---
+$version = "1.0.0"
+
 # --- Add necessary assemblies for GUI ---
 Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
 # --- Global Variables & Logging Setup ---
@@ -77,13 +72,14 @@ function Update-DetectedPathsUI { Update-UIAndLog "Refreshing detected paths..."
 
 # --- SCRIPT EXECUTION LOGIC ---
 Write-Log "--------------------------------"
+Write-Log "Application v$version starting..."
 if ($UserName) { try { $userObject = Get-CimInstance -ClassName Win32_UserAccount -Filter "Name = '$UserName'" -ErrorAction Stop; if ($userObject) { $profile = Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($userObject.SID)"; $script:activeUser = [PSCustomObject]@{ UserName = $userObject.Name; ProfilePath = $profile.ProfileImagePath } } } catch { Write-Warning "Could not find specified user '$UserName'. Error: $_" } } else { $script:activeUser = Get-ActiveUser }
 if (!$script:activeUser) { $errorMessage = "FATAL: Could not determine active user profile. Cannot continue."; Update-UIAndLog $errorMessage; if (!$PSBoundParameters.ContainsKey('Action')) { [System.Windows.Forms.MessageBox]::Show($errorMessage, "Error", "OK", "Error") }; Exit 1 }
 $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath
 if ($PSBoundParameters.ContainsKey('Action')) { Update-UIAndLog "Running in command-line mode for user '$($script:activeUser.UserName)'."; if (-not ($PSBoundParameters.ContainsKey('Path') -and $PSBoundParameters.ContainsKey('Items'))) { Update-UIAndLog "ERROR: -Action, -Path, and -Items are mandatory."; Exit 1 }; $success = $false; if ($Action -eq 'backup') { $success = Start-Backup -BackupPath $Path -ItemsToBackup $Items } elseif ($Action -eq 'restore') { $success = Start-Restore -RestorePath $Path -ItemsToRestore $Items }; Update-UIAndLog "Command-line operation finished."; if ($success) { Exit 0 } else { Exit 1 } }
 
 # --- GUI Window and Controls ---
-$script:mainForm = New-Object System.Windows.Forms.Form; $script:mainForm.Text = "Office Customization Backup & Restore"; $script:mainForm.MinimumSize = '580, 720'; $script:mainForm.Size = '600, 760'; $script:mainForm.StartPosition = "CenterScreen"; $script:mainForm.FormBorderStyle = "Sizable"
+$script:mainForm = New-Object System.Windows.Forms.Form; $script:mainForm.Text = "Office Customization Backup & Restore - v$version"; $script:mainForm.MinimumSize = '580, 720'; $script:mainForm.Size = '600, 760'; $script:mainForm.StartPosition = "CenterScreen"; $script:mainForm.FormBorderStyle = "Sizable"
 $optionsGroupBox = New-Object System.Windows.Forms.GroupBox; $optionsGroupBox.Location = '20, 20'; $optionsGroupBox.Size = '540, 110'; $optionsGroupBox.Text = "1. Select Items to Process"; $optionsGroupBox.Anchor = "Top, Left, Right"
 $pathsGroupBox = New-Object System.Windows.Forms.GroupBox; $pathsGroupBox.Location = '20, 140'; $pathsGroupBox.Size = '540, 200'; $pathsGroupBox.Text = "2. Detected Paths for: $($script:activeUser.UserName)"; $pathsGroupBox.Anchor = "Top, Left, Right"
 $actionGroupBox = New-Object System.Windows.Forms.GroupBox; $actionGroupBox.Location = '20, 350'; $actionGroupBox.Size = '540, 150'; $actionGroupBox.Text = "3. Perform Action"; $actionGroupBox.Anchor = "Top, Left, Right"
@@ -117,10 +113,9 @@ $script:mainForm.Controls.AddRange(@($optionsGroupBox, $pathsGroupBox, $actionGr
 $script:checkboxMap = @{ RibbonUI = $chkRibbon; Templates = $chkTemplates; Signatures = $chkSignatures; Dictionaries = $chkDictionaries; AutoComplete = $chkAutoComplete; ExcelMacros = $chkExcelMacros; AutoCorrect = $chkAutoCorrect }
 
 # --- GUI Event Handlers ---
-$script:mainForm.Add_Load({ Update-UIAndLog "GUI started for user '$($script:activeUser.UserName)'."; if ($logFile) { $logFileLabel.Text = "Log File: $logFile" } else { $logFileLabel.Text = "Log File: Disabled (insufficient permissions)" }; Update-DetectedPathsUI })
+$script:mainForm.Add_Load({ Update-UIAndLog "GUI v$version started for user '$($script:activeUser.UserName)'."; if ($logFile) { $logFileLabel.Text = "Log File: $logFile" } else { $logFileLabel.Text = "Log File: Disabled (insufficient permissions)" }; Update-DetectedPathsUI })
 $refreshButton.Add_Click({ Update-DetectedPathsUI })
 $helpButton.Add_Click({
-    # --- THIS IS THE CORRECTED HELP MESSAGE ---
     $bullet = [char]0x2022 # Programmatically define the bullet point character
     $helpMessage = @"
 ITEM DESCRIPTIONS:
@@ -142,9 +137,9 @@ $bullet AutoCorrect: Your list of custom text replacements, for example typing (
     [System.Windows.Forms.MessageBox]::Show($helpMessage, "Backup Item Help", "OK", "Information")
 })
 $browseButton.Add_Click({ $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog; if ($folderBrowser.ShowDialog() -eq "OK") { $pathTextBox.Text = $folderBrowser.SelectedPath } })
-$backupButton.Add_Click({ if ([string]::IsNullOrWhiteSpace($pathTextBox.Text)) { [System.Windows.Forms.MessageBox]::Show("Select backup path.", "Error", "OK", "Error"); return }; $items = ($optionsGroupBox.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Checked } | ForEach-Object { ($script:checkboxMap.GetEnumerator() | Where-Object { $_.Value -eq $_ }).Key }); if ($items.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Select at least one item.", "Warning", "OK", "Warning"); return }; if (Start-Backup -BackupPath $pathTextBox.Text -ItemsToBackup $items) { [System.Windows.Forms.MessageBox]::Show("Backup complete.", "Success", "OK", "Information") } else { [System.Windows.Forms.MessageBox]::Show("Error during backup. Check log.", "Error", "OK", "Error") } })
-$restoreButton.Add_Click({ if ([string]::IsNullOrWhiteSpace($pathTextBox.Text)) { [System.Windows.Forms.MessageBox]::Show("Select restore path.", "Error", "OK", "Error"); return }; $items = ($optionsGroupBox.Controls | Where-Object { $_ -is [System.Windows.Forms.CheckBox] -and $_.Checked } | ForEach-Object { ($script:checkboxMap.GetEnumerator() | Where-Object { $_.Value -eq $_ }).Key }); if ($items.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Select at least one item.", "Warning", "OK", "Warning"); return }; if (Start-Restore -RestorePath $pathTextBox.Text -ItemsToRestore $items) { [System.Windows.Forms.MessageBox]::Show("Restore complete.", "Success", "OK", "Information") } else { [System.Windows.Forms.MessageBox]::Show("Error during restore. Check log.", "Error", "OK", "Error") } })
+$backupButton.Add_Click({ if ([string]::IsNullOrWhiteSpace($pathTextBox.Text)) { [System.Windows.Forms.MessageBox]::Show("Select backup path.", "Error", "OK", "Error"); return }; $items = ($script:checkboxMap.GetEnumerator() | Where-Object { $_.Value.Checked } | ForEach-Object { $_.Key }); if ($items.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Select at least one item.", "Warning", "OK", "Warning"); return }; if (Start-Backup -BackupPath $pathTextBox.Text -ItemsToBackup $items) { [System.Windows.Forms.MessageBox]::Show("Backup complete.", "Success", "OK", "Information") } else { [System.Windows.Forms.MessageBox]::Show("Error during backup. Check log.", "Error", "OK", "Error") } })
+$restoreButton.Add_Click({ if ([string]::IsNullOrWhiteSpace($pathTextBox.Text)) { [System.Windows.Forms.MessageBox]::Show("Select restore path.", "Error", "OK", "Error"); return }; $items = ($script:checkboxMap.GetEnumerator() | Where-Object { $_.Value.Checked } | ForEach-Object { $_.Key }); if ($items.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("Select at least one item.", "Warning", "OK", "Warning"); return }; if (Start-Restore -RestorePath $pathTextBox.Text -ItemsToRestore $items) { [System.Windows.Forms.MessageBox]::Show("Restore complete.", "Success", "OK", "Information") } else { [System.Windows.Forms.MessageBox]::Show("Error during restore. Check log.", "Error", "OK", "Error") } })
 
 # --- Show the GUI ---
 $script:mainForm.ShowDialog()
-Write-Log "Application closed."
+Write-Log "Application v$version closed."
