@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
     A comprehensive tool for administrators to back up and restore a user's Microsoft Office settings.
-    Includes full support for PowerPoint, Visio, and other Office applications.
+    Includes full support for PowerPoint, Visio, and file-based VBA Add-ins.
 
 .DESCRIPTION
     This script is designed to be run as SYSTEM or an Administrator. It automatically detects the
     currently active desktop user and targets their profile for backup and restore of key Office settings.
 
 .VERSION
-    1.1.0
+    1.2.0
 
 .PARAMETER UserName
     Optional. Explicitly specifies the username to target (e.g., 'jdoe'), overriding auto-detection.
@@ -20,35 +20,22 @@
     For command-line use. The root folder for the backup/restore operation.
 
 .PARAMETER Items
-    For command-line use. An array of items to process: 'RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect', 'VisioContent'.
+    For command-line use. An array of items to process: 'RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect', 'VisioContent', 'AddIns'.
 
 .EXAMPLE
-    # Run in interactive GUI mode. Will auto-detect the user at the console.
-    # Must be "Run as administrator".
-    .\OfficeCustomizationTool.ps1
-
-.EXAMPLE
-    # Back up Outlook Signatures and the Auto-Complete list for the active user.
-    .\OfficeCustomizationTool.ps1 -Action backup -Path "C:\IT_Backups" -Items "Signatures", "AutoComplete"
-
-.EXAMPLE
-    # Back up ALL supported settings for a specific user 'bsmith' to a network share.
-    .\OfficeCustomizationTool.ps1 -Action backup -Path "\\FileServer\Backups\bsmith" -UserName "bsmith" -Items "RibbonUI","Templates","Signatures","Dictionaries","AutoComplete","ExcelMacros","AutoCorrect","VisioContent"
-
-.EXAMPLE
-    # Restore only Visio content for the active user from a backup.
-    .\OfficeCustomizationTool.ps1 -Action restore -Path "C:\IT_Backups" -Items "VisioContent"
+    # Back up ALL supported settings, including file-based Add-ins, for the active user.
+    .\OfficeCustomizationTool.ps1 -Action backup -Path "C:\Backups" -Items "RibbonUI","Templates","Signatures","Dictionaries","AutoComplete","ExcelMacros","AutoCorrect","VisioContent","AddIns"
 #>
 param(
     [Parameter(HelpMessage = "Explicitly specify a user to target, overriding auto-detection.")] [string]$UserName,
     [Parameter(HelpMessage = "Specify the action: backup or restore.")] [ValidateSet('backup', 'restore', IgnoreCase = $true)] [string]$Action,
     [Parameter(HelpMessage = "The root directory for the backup/restore files.")] [string]$Path,
     [Parameter(HelpMessage = "The specific items to process.")]
-    [ValidateSet('RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect', 'VisioContent', IgnoreCase = $true)]
+    [ValidateSet('RibbonUI', 'Templates', 'Signatures', 'Dictionaries', 'AutoComplete', 'ExcelMacros', 'AutoCorrect', 'VisioContent', 'AddIns', IgnoreCase = $true)]
     [string[]]$Items
 )
 # --- APPLICATION VERSION ---
-$version = "1.1.0"
+$version = "1.2.0"
 
 # --- Add necessary assemblies for GUI ---
 Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing
@@ -65,12 +52,13 @@ function Get-OfficeCustomizationPaths {
     $documentsPath = (Get-ItemProperty -Path $userShellFolders -ErrorAction SilentlyContinue).Personal
     $paths = @{
         RibbonUI     = @{ Name = "Ribbon/Toolbar"; Path = Join-Path $localAppData "Microsoft\Office"; Exists = $false; Filter = "*.officeUI"; Type = "File" }
-        Templates    = @{ Name = "Office Templates"; Path = Join-Path $roamingAppData "Microsoft\Templates"; Exists = $false; Filter = "*"; Type = "File" }
+        Templates    = @{ Name = "Office Templates"; Path = Join-Path $roamingAppData "Microsoft\Templates"; Exists = $false; Filter = "*"; Type = "Folder" }
         Signatures   = @{ Name = "Outlook Signatures"; Path = Join-Path $roamingAppData "Microsoft\Signatures"; Exists = $false; Filter = "*"; Type = "Folder" }
         Dictionaries = @{ Name = "Custom Dictionaries"; Path = Join-Path $roamingAppData "Microsoft\UProof"; Exists = $false; Filter = "*.dic"; Type = "File" }
         AutoComplete = @{ Name = "Outlook Auto-Complete"; Path = Join-Path $localAppData "Microsoft\Outlook\RoamCache"; Exists = $false; Filter = "Stream_Autocomplete_*.dat"; Type = "File" }
         ExcelMacros  = @{ Name = "Global Excel Macros"; Path = Join-Path $roamingAppData "Microsoft\Excel\XLSTART"; Exists = $false; Filter = "PERSONAL.XLSB"; Type = "File" }
         AutoCorrect  = @{ Name = "Office AutoCorrect"; Path = Join-Path $roamingAppData "Microsoft\Office"; Exists = $false; Filter = "*.acl"; Type = "File" }
+        AddIns       = @{ Name = "VBA/File Add-ins"; Path = Join-Path $roamingAppData "Microsoft\AddIns"; Exists = $false; Filter = "*"; Type = "Folder" } # NEW ITEM
     }
     if ($documentsPath -and (Test-Path $documentsPath)) {
         $paths.Add("VisioContent", @{ Name = "Visio Stencils/Templates"; Path = Join-Path $documentsPath "My Shapes"; Exists = $false; Filter = "*"; Type = "Folder" })
@@ -82,10 +70,11 @@ function Get-OfficeCustomizationPaths {
     }
     return $paths
 }
+# (All other functions remain the same)
 function Write-Log { param([string]$message); if ($logFile) { "$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) $message" | Add-Content -Path $logFile } }
 function Update-UIAndLog { param([string]$message); Write-Log $message; if ($PSBoundParameters.ContainsKey('Action')) { Write-Host $message }; if ($script:logTextBox) { $script:logTextBox.AppendText("`r`n$message"); $script:logTextBox.SelectionStart = $script:logTextBox.Text.Length; $script:logTextBox.ScrollToCaret(); $script:mainForm.Update() } }
-function Start-Backup { param([string]$BackupPath, [string[]]$ItemsToBackup); Update-UIAndLog "Starting backup for user '$($script:activeUser.UserName)'..."; try { foreach ($key in $ItemsToBackup) { if ($script:customizationPaths[$key].Exists) { $sourceInfo = $script:customizationPaths[$key]; $destination = Join-Path $BackupPath $key; if (!(Test-Path $destination)) { New-Item -Path $destination -ItemType Directory -Force | Out-Null }; Update-UIAndLog "Backing up $($sourceInfo.Name)..."; if ($sourceInfo.Type -eq "File") { Get-ChildItem -Path $sourceInfo.Path -Filter $sourceInfo.Filter | ForEach-Object { Copy-Item -Path $_.FullName -Destination $destination -Force } } elseif ($sourceInfo.Type -eq "Folder") { Copy-Item -Path ($sourceInfo.Path + "\*") -Destination $destination -Recurse -Force } } else { Update-UIAndLog "Skipping ${key}: Not found." } }; Update-UIAndLog "Backup completed successfully!"; return $true } catch { Update-UIAndLog "ERROR during backup: $_"; return $false } }
-function Start-Restore { param([string]$RestorePath, [string[]]$ItemsToRestore); $runningOfficeProcs = Get-Process -Name $officeApps -ErrorAction SilentlyContinue; if ($runningOfficeProcs) { $message = "Office apps must be closed. Close them now?"; $result = 'No'; if (!$PSBoundParameters.ContainsKey('Action')) { $result = [System.Windows.Forms.MessageBox]::Show($message, "Warning", "YesNo", "Warning") } else { Update-UIAndLog "WARNING: Office apps running. Aborting."; return $false }; if ($result -eq 'Yes') { Update-UIAndLog "Closing Office apps..."; $runningOfficeProcs | Stop-Process -Force; Start-Sleep -Seconds 2 } else { Update-UIAndLog "Restore cancelled."; return $false } }; Update-UIAndLog "Starting restore for user '$($script:activeUser.UserName)'..."; try { foreach ($key in $ItemsToRestore) { $sourceInfo = $script:customizationPaths[$key]; $destinationInfo = $script:customizationPaths[$key]; $source = Join-Path $RestorePath $key; if (Test-Path $source) { Update-UIAndLog "Restoring $($sourceInfo.Name)..."; Copy-Item -Path ($source + "\*") -Destination $destinationInfo.Path -Recurse -Force } else { Update-UIAndLog "WARNING: Source for $key not found. Skipping." } }; Update-UIAndLog "Restore completed successfully!"; return $true } catch { Update-UIAndLog "ERROR during restore: $_"; return $false } }
+function Start-Backup { param([string]$BackupPath, [string[]]$ItemsToBackup); Update-UIAndLog "Starting backup for user '$($script:activeUser.UserName)'..."; try { foreach ($key in $ItemsToBackup) { if ($script:customizationPaths.ContainsKey($key) -and $script:customizationPaths[$key].Exists) { $sourceInfo = $script:customizationPaths[$key]; $destination = Join-Path $BackupPath $key; if (!(Test-Path $destination)) { New-Item -Path $destination -ItemType Directory -Force | Out-Null }; Update-UIAndLog "Backing up $($sourceInfo.Name)..."; if ($sourceInfo.Type -eq "File") { Get-ChildItem -Path $sourceInfo.Path -Filter $sourceInfo.Filter | ForEach-Object { Copy-Item -Path $_.FullName -Destination $destination -Force } } elseif ($sourceInfo.Type -eq "Folder") { Copy-Item -Path ($sourceInfo.Path + "\*") -Destination $destination -Recurse -Force } } else { Update-UIAndLog "Skipping ${key}: Not found." } }; Update-UIAndLog "Backup completed successfully!"; return $true } catch { Update-UIAndLog "ERROR during backup: $_"; return $false } }
+function Start-Restore { param([string]$RestorePath, [string[]]$ItemsToRestore); $runningOfficeProcs = Get-Process -Name $officeApps -ErrorAction SilentlyContinue; if ($runningOfficeProcs) { $message = "Office apps must be closed. Close them now?"; $result = 'No'; if (!$PSBoundParameters.ContainsKey('Action')) { $result = [System.Windows.Forms.MessageBox]::Show($message, "Warning", "YesNo", "Warning") } else { Update-UIAndLog "WARNING: Office apps running. Aborting."; return $false }; if ($result -eq 'Yes') { Update-UIAndLog "Closing Office apps..."; $runningOfficeProcs | Stop-Process -Force; Start-Sleep -Seconds 2 } else { Update-UIAndLog "Restore cancelled."; return $false } }; Update-UIAndLog "Starting restore for user '$($script:activeUser.UserName)'..."; try { foreach ($key in $ItemsToRestore) { if ($script:customizationPaths.ContainsKey($key)) { $sourceInfo = $script:customizationPaths[$key]; $destinationInfo = $script:customizationPaths[$key]; $source = Join-Path $RestorePath $key; if (Test-Path $source) { Update-UIAndLog "Restoring $($sourceInfo.Name)..."; Copy-Item -Path ($source + "\*") -Destination $destinationInfo.Path -Recurse -Force } else { Update-UIAndLog "WARNING: Source for $key not found. Skipping." } } }; Update-UIAndLog "Restore completed successfully!"; return $true } catch { Update-UIAndLog "ERROR during restore: $_"; return $false } }
 function Update-DetectedPathsUI { Update-UIAndLog "Refreshing detected paths..."; $script:customizationPaths = Get-OfficeCustomizationPaths -UserProfilePath $script:activeUser.ProfilePath -UserSID $script:activeUser.SID; $pathMessage = ""; foreach($key in $script:checkboxMap.Keys){ if ($script:customizationPaths.ContainsKey($key)) { $pathInfo = $script:customizationPaths[$key]; $status = if ($pathInfo.Exists) { "Detected" } else { "Not Found" }; $checkboxMap[$key].Enabled = $pathInfo.Exists; $checkboxMap[$key].Checked = $pathInfo.Exists; $pathMessage += "$($pathInfo.Name)`: ($status)`r`n  $($pathInfo.Path)`r`n`r`n" } else { $checkboxMap[$key].Enabled = $false; $checkboxMap[$key].Checked = $false } }; $pathDisplayTextBox.Text = $pathMessage.Trim(); Update-UIAndLog "Detection refresh complete." }
 
 # --- SCRIPT EXECUTION LOGIC ---
@@ -113,9 +102,10 @@ $chkAutoComplete = New-Object System.Windows.Forms.CheckBox; $chkAutoComplete.Te
 $chkExcelMacros = New-Object System.Windows.Forms.CheckBox; $chkExcelMacros.Text = "Global Excel Macros"; $chkExcelMacros.Location = '20, 80'; $chkExcelMacros.AutoSize = $true
 $chkAutoCorrect = New-Object System.Windows.Forms.CheckBox; $chkAutoCorrect.Text = "Office AutoCorrect"; $chkAutoCorrect.Location = '200, 80'; $chkAutoCorrect.AutoSize = $true
 $chkVisioContent = New-Object System.Windows.Forms.CheckBox; $chkVisioContent.Text = "Visio Stencils/Templates"; $chkVisioContent.Location = '20, 105'; $chkVisioContent.AutoSize = $true
+$chkAddIns = New-Object System.Windows.Forms.CheckBox; $chkAddIns.Text = "VBA/File Add-ins"; $chkAddIns.Location = '200, 105'; $chkAddIns.AutoSize = $true
 $helpButton = New-Object System.Windows.Forms.Button; $helpButton.Location = '360, 103'; $helpButton.Size = '160, 23'; $helpButton.Text = "What do these items mean?"; $helpButton.Anchor = "Top, Right"
-$optionsGroupBox.Controls.AddRange(@($chkRibbon, $chkTemplates, $chkSignatures, $chkDictionaries, $chkAutoComplete, $chkExcelMacros, $chkAutoCorrect, $chkVisioContent, $helpButton))
-# Paths display and other controls are the same...
+$optionsGroupBox.Controls.AddRange(@($chkRibbon, $chkTemplates, $chkSignatures, $chkDictionaries, $chkAutoComplete, $chkExcelMacros, $chkAutoCorrect, $chkVisioContent, $chkAddIns, $helpButton))
+# Paths display and other controls...
 $pathDisplayTextBox = New-Object System.Windows.Forms.TextBox; $pathDisplayTextBox.Location = '15, 25'; $pathDisplayTextBox.Size = '510, 130'; $pathDisplayTextBox.Multiline = $true; $pathDisplayTextBox.ReadOnly = $true; $pathDisplayTextBox.Scrollbars = "Vertical"; $pathDisplayTextBox.Anchor = "Top, Bottom, Left, Right"; $pathDisplayTextBox.Font = "Consolas, 8.5"
 $refreshButton = New-Object System.Windows.Forms.Button; $refreshButton.Location = '15, 160'; $refreshButton.Size = '510, 25'; $refreshButton.Text = "Refresh Detection"; $refreshButton.Anchor = "Bottom, Left, Right"
 $pathsGroupBox.Controls.AddRange(@($pathDisplayTextBox, $refreshButton))
@@ -129,7 +119,7 @@ $script:logTextBox = New-Object System.Windows.Forms.TextBox; $script:logTextBox
 $logFileLabel = New-Object System.Windows.Forms.Label; $logFileLabel.Location = '15, 135'; $logFileLabel.Size = '510, 20'; $logFileLabel.Anchor = "Bottom, Left, Right";
 $logGroupBox.Controls.AddRange(@($script:logTextBox, $logFileLabel))
 $script:mainForm.Controls.AddRange(@($optionsGroupBox, $pathsGroupBox, $actionGroupBox, $logGroupBox))
-$script:checkboxMap = @{ RibbonUI = $chkRibbon; Templates = $chkTemplates; Signatures = $chkSignatures; Dictionaries = $chkDictionaries; AutoComplete = $chkAutoComplete; ExcelMacros = $chkExcelMacros; AutoCorrect = $chkAutoCorrect; VisioContent = $chkVisioContent }
+$script:checkboxMap = @{ RibbonUI = $chkRibbon; Templates = $chkTemplates; Signatures = $chkSignatures; Dictionaries = $chkDictionaries; AutoComplete = $chkAutoComplete; ExcelMacros = $chkExcelMacros; AutoCorrect = $chkAutoCorrect; VisioContent = $chkVisioContent; AddIns = $chkAddIns }
 
 # --- GUI Event Handlers ---
 $script:mainForm.Add_Load({ Update-UIAndLog "GUI v$version started for user '$($script:activeUser.UserName)'."; if ($logFile) { $logFileLabel.Text = "Log File: $logFile" } else { $logFileLabel.Text = "Log File: Disabled (insufficient permissions)" }; Update-DetectedPathsUI })
@@ -154,6 +144,8 @@ $bullet Global Excel Macros: Macros stored in your PERSONAL.XLSB file, available
 $bullet Office AutoCorrect: Your list of custom text replacements (e.g., '(c)' to a copyright symbol).
 
 $bullet Visio Stencils/Templates: Custom shape collections (.vssx) and templates (.vstx) from your 'My Shapes' folder.
+
+$bullet VBA/File Add-ins: User-installed add-ins for Excel (.xlam) and PowerPoint (.ppam). This does not include installed programs (COM Add-ins).
 "@
     [System.Windows.Forms.MessageBox]::Show($helpMessage, "Backup Item Help", "OK", "Information")
 })
